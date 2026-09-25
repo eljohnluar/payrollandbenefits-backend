@@ -1,14 +1,12 @@
-# Render Blueprint — PHP API (backend/) with Supabase PostgreSQL.
-# Connect this repo in Render and the service below is created automatically.
+# Render Blueprint — PHP API shipped as a Docker image, with Supabase PostgreSQL.
+# Connect this repo in Render via New → Blueprint and everything below is pre-filled.
 services:
   - type: web
     name: payroll-api
-    env: php
+    env: docker
     plan: free
-    rootDir: backend
+    dockerfilePath: ./Dockerfile
     region: singapore          # nearest Render region to the Mumbai (ap-south-1) Supabase pooler
-    buildCommand: composer install --no-dev --optimize-autoloader
-    startCommand: php -S 0.0.0.0:$PORT -t public
     healthCheckPath: /api/health
     envVars:
       - key: APP_DEBUG
@@ -16,7 +14,7 @@ services:
       - key: APP_SECRET
         generateValue: true    # JWT signing secret — Render creates a random one on first deploy
       - key: FRONTEND_ORIGIN
-        sync: false            # set to your Vercel URL, e.g. https://payroll.vercel.app
+        sync: false            # your Vercel URL(s), comma-separated, e.g. https://payroll.vercel.app,https://preview.payroll.vercel.app
       - key: REGISTRATION_CODE
         sync: false            # gate code for the Register page (leave unset to disable self-registration)
       - key: SUPABASE_DB_HOST

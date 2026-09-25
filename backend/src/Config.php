@@ -50,9 +50,30 @@ final class Config
         );
     }
 
-    public static function allowedOrigin(): string
+    /** Comma-separated list of allowed browser origins. */
+    public static function allowedOrigins(): array
     {
-        return (string) env('FRONTEND_ORIGIN', 'http://localhost:5173');
+        $default = 'https://payrollandbenefits-frontend.vercel.app,http://localhost:5173';
+        return array_values(array_filter(array_map(
+            static fn ($o) => rtrim(trim($o), '/'),
+            explode(',', (string) env('FRONTEND_ORIGIN', $default))
+        ), static fn ($o) => $o !== ''));
+    }
+
+    /**
+     * CORS origin for this request: echoes the caller's origin when it is
+     * allow-listed (so Vercel preview URLs work), else the first entry.
+     */
+    public static function corsOrigin(?string $requestOrigin = null): string
+    {
+        $allowed = self::allowedOrigins();
+        if ($requestOrigin !== null && $requestOrigin !== '') {
+            $normalized = rtrim($requestOrigin, '/');
+            if (in_array($normalized, $allowed, true)) {
+                return $normalized;
+            }
+        }
+        return $allowed[0] ?? '';
     }
 
     /** Gate code required for self-registration (mirrors payrollandbenefits_php REGISTRATION_CODE). */

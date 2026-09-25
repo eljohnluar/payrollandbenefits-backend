@@ -21,11 +21,13 @@ spl_autoload_register(static function (string $class): void {
 use App\Config;
 use App\Http;
 
-$origin = Config::allowedOrigin();
-header('Access-Control-Allow-Origin: ' . $origin);
+$origin = Config::corsOrigin($_SERVER['HTTP_ORIGIN'] ?? null);
+if ($origin !== '') {
+    header('Access-Control-Allow-Origin: ' . $origin);
+}
 header('Vary: Origin');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
-header('Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS');
+header('Access-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS');
 header('Access-Control-Max-Age: 600');
 
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
