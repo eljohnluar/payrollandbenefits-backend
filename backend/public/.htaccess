@@ -1,0 +1,8 @@
+Options -MultiViews -Indexes
+
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [QSA,L]
+
+# Some hosts strip the Authorization header before PHP sees it.
+SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1

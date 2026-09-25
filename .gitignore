@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Builds
+frontend/dist/
+backend/vendor/
+
+# Local environment — never commit real secrets
+.env
+*.env.local
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
