@@ -24,6 +24,8 @@ final class Router
 
     public function dispatch(string $method, string $path): void
     {
+        // Tolerate duplicated leading slashes (e.g. a base URL with a trailing "/").
+        $path = preg_replace('#^/+#', '/', $path) ?? $path;
         $path = rtrim($path, '/') ?: '/';
         $matchedPath = false;
         foreach ($this->routes as $route) {
