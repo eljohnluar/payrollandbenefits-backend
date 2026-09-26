@@ -130,6 +130,18 @@ $router->get('/api/audit', static function (): void {
     Http::json(AuditService::list($_GET));
 });
 
+$router->post('/api/audit/reset', static function (): void {
+    $user = Auth::requireRole('Admin', 'HR');
+    $password = (string) (Http::body()['password'] ?? '');
+    if ($password === '' || !Auth::verifyPassword($password)) {
+        AuditService::log('Failed Audit Reset', 'Audit', (int) $user['id'], ['reason' => 'wrong password']);
+        Http::error('Incorrect password.', 403);
+    }
+    $deleted = (int) Database::pdo()->exec('DELETE FROM audit_log');
+    AuditService::log('Audit Log Reset', 'Audit', (int) $user['id'], ['deleted' => $deleted]);
+    Http::json(['ok' => true, 'deleted' => $deleted]);
+});
+
 /* ── Archive (soft-deleted records) ─────────────────── */
 
 $router->get('/api/archive', static function () use ($archiver): void {
