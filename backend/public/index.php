@@ -66,6 +66,11 @@ $router->get('/api/health', static function (): void {
     ]);
 });
 
+$router->get('/api/branding', static function (): void {
+    // Public on purpose: only the company name shown on the login/register cards.
+    Http::json(['company_name' => (string) SettingsService::get('company_name', '')]);
+});
+
 $router->post('/api/auth/login', static function (): void {
     $body = Http::body();
     $email = Http::requireString($body, 'email');
@@ -73,6 +78,10 @@ $router->post('/api/auth/login', static function (): void {
     if ($result === null) {
         AuditService::log('Failed Login', 'Auth', null, ['email' => $email, 'reason' => 'bad credentials']);
         Http::error('Email or password is incorrect.', 401);
+    }
+    if (!empty($result['otp_required'])) {
+        AuditService::log('Login Code Sent', 'Auth', null, ['email' => $result['email'], 'reason' => 'password ok, awaiting email code']);
+        Http::json($result);
     }
     AuditService::log('User Login', 'Auth', (int) $result['user']['id'], ['email' => $result['user']['email']]);
     Http::json($result);
@@ -92,6 +101,20 @@ $router->post('/api/auth/register', static function (): void {
         (string) ($body['password'] ?? ''),
         (string) ($body['registration_code'] ?? '')
     ), 201);
+});
+
+$router->post('/api/auth/supabase', static function (): void {
+    $body = Http::body();
+    $result = Auth::exchangeFromSupabase(Http::requireString($body, 'access_token'), $body);
+    AuditService::log('User Login', 'Auth', (int) $result['user']['id'], ['email' => $result['user']['email'], 'via' => 'supabase']);
+    Http::json($result);
+});
+
+$router->post('/api/auth/reset-password', static function (): void {
+    $body = Http::body();
+    $result = Auth::resetPassword(Http::requireString($body, 'access_token'), (string) ($body['password'] ?? ''));
+    AuditService::log('Password Reset', 'Auth', null, ['email' => $result['email'], 'via' => 'supabase recovery']);
+    Http::json($result);
 });
 
 /* ── Authenticated reads ────────────────────────────── */

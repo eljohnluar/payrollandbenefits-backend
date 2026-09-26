@@ -42,6 +42,10 @@ final class Auth
         if ($claims === null) {
             return null;
         }
+        // A password-verified-but-not-yet-OTP'd user gets no app session.
+        if (($claims['scope'] ?? '') === 'otp_pending') {
+            return null;
+        }
         $user = self::findAppUser((string) ($claims['email'] ?? ''));
         if ($user === null) {
             return null;
@@ -121,6 +125,11 @@ final class Auth
         return "{$header}.{$payload}.{$sig}";
     }
 
+    /**
+     * Password check only — a usable session additionally requires the 6-digit
+     * email code (Supabase OTP) verified through /api/auth/supabase with the
+     * returned pending token.
+     */
     public static function login(string $email, string $password): ?array
     {
         $stmt = Database::pdo()->prepare(
@@ -132,16 +141,18 @@ final class Auth
         if ($user === false || !password_verify($password, $user['password'])) {
             return null;
         }
-        $token = self::issue([
-            'sub'   => (string) $user['id'],
-            'email' => $user['email'],
-            'role'  => $user['role'],
-            'iss'   => 'payroll-backend',
-            'aud'   => 'payroll-frontend',
-        ]);
+        $pending = self::issue([
+            'sub'    => (string) $user['id'],
+            'email'  => $user['email'],
+            'role'   => $user['role'],
+            'scope'  => 'otp_pending',
+            'iss'    => 'payroll-backend',
+            'aud'    => 'payroll-frontend',
+        ], 600);
         return [
-            'token' => $token,
-            'user'  => ['id' => (int) $user['id'], 'email' => $user['email'], 'name' => $user['name'], 'role' => $user['role']],
+            'otp_required' => true,
+            'email'        => $user['email'],
+            'pending'      => $pending,
         ];
     }
 
@@ -154,11 +165,18 @@ final class Auth
     {
         $email = strtolower(trim($email));
         $username = trim($username);
-        if ($email === '' || $username === '' || $password === '') {
+        if ($username === '' || $password === '') {
             Http::error('Email, display name and password are required.', 422);
         }
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             Http::error('Enter a valid email address.', 422);
+        }
+        if (strlen($username) < 2) {
+            Http::error('Display name must be at least 2 characters.', 422);
+        }
+        $weak = self::strongPasswordProblem($password);
+        if ($weak !== null) {
+            Http::error($weak, 422);
         }
         $expected = Config::registrationCode();
         if ($expected === '') {
@@ -190,6 +208,187 @@ final class Auth
             'message' => 'Registration successful. You can now login with your email.',
             'user'    => ['id' => (int) $user['id'], 'email' => $user['email'], 'name' => $user['name'], 'role' => $user['role']],
         ];
+    }
+
+    /**
+     * Exchanges a Supabase Auth access token (email confirmation or OTP login)
+     * for an app JWT. The token is validated against GoTrue's /user endpoint
+     * rather than by checking its signature, so both legacy HS256 and the
+     * newer ES256 signing keys work. Unknown emails are provisioned here only
+     * after passing the same registration-code gate as the password form.
+     */
+    public static function exchangeFromSupabase(string $accessToken, array $body = []): array
+    {
+        $baseUrl = Config::supabaseUrl();
+        $anonKey = Config::anonKey();
+        if ($baseUrl === '' || $anonKey === '') {
+            Http::error('Supabase Auth is not configured on this server.', 503);
+        }
+        $claims = self::supabaseUser($baseUrl, $anonKey, $accessToken);
+        if ($claims === null) {
+            Http::error('That Supabase session is not valid or has expired.', 401);
+        }
+        $email = strtolower(trim((string) ($claims['email'] ?? '')));
+        if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            Http::error('The Supabase account has no usable email address.', 401);
+        }
+        if (empty($claims['email_confirmed_at'])) {
+            Http::error('Confirm your email address first, then return to this tab.', 403, [
+                'email_confirmation_pending' => true,
+            ]);
+        }
+
+        // Second-factor path: the password was already verified and produced a
+        // short-lived otp_pending token; the Supabase OTP session must belong to
+        // the same address. No provisioning happens here — the account exists.
+        $pending = trim((string) ($body['pending'] ?? ''));
+        if ($pending !== '') {
+            $pc = self::verify($pending);
+            if ($pc === null || ($pc['scope'] ?? '') !== 'otp_pending'
+                || strcasecmp((string) ($pc['email'] ?? ''), $email) !== 0) {
+                Http::error('That verification request is no longer valid. Sign in again to get a new code.', 401);
+            }
+            $user = self::findAppUser($email);
+            if ($user === null) {
+                Http::error('No workspace account exists for that email.', 403);
+            }
+            return self::sessionFor($user);
+        }
+
+        $meta = is_array($claims['user_metadata'] ?? null) ? $claims['user_metadata'] : [];
+        $user = self::findAppUser($email);
+        if ($user === null) {
+            $expected = Config::registrationCode();
+            $code = strtoupper(trim((string) ($body['registration_code'] ?? $meta['registration_code'] ?? '')));
+            if ($code === '' || $expected === '' || !hash_equals($expected, $code)) {
+                Http::error('Enter your HR registration code to activate this account.', 428, [
+                    'needs_registration_code' => true,
+                ]);
+            }
+            $password = (string) ($body['password'] ?? '');
+            $weak = self::strongPasswordProblem($password);
+            if ($weak !== null) {
+                Http::error($weak . ' (used for payslip access)', 422, [
+                    'needs_registration_code' => true,
+                    'needs_password'          => true,
+                ]);
+            }
+            $name = trim((string) ($body['name'] ?? $meta['name'] ?? ''));
+            if ($name === '') {
+                $name = explode('@', $email)[0];
+            }
+            $pdo = Database::pdo();
+            $check = $pdo->prepare('SELECT id FROM app_users WHERE lower(email) = ?');
+            $check->execute([$email]);
+            if ($check->fetch() === false) {
+                $uid = (string) ($claims['id'] ?? '');
+                $insert = $pdo->prepare(
+                    "INSERT INTO app_users (email, password, name, role, initials, is_active, auth_uid)
+                     VALUES (?, ?, ?, 'HR', ?, TRUE, ?)
+                     RETURNING id, email, name, role"
+                );
+                $insert->execute([
+                    $email,
+                    password_hash($password, PASSWORD_DEFAULT),
+                    $name,
+                    strtoupper(substr($name, 0, 2)),
+                    preg_match('/^[0-9a-f-]{36}$/i', $uid) ? $uid : null,
+                ]);
+                if ($insert->fetch(PDO::FETCH_ASSOC) === false) {
+                    Http::error('An error occurred during registration.', 500);
+                }
+            }
+            $user = self::findAppUser($email);
+            if ($user === null) {
+                Http::error('An error occurred during registration.', 500);
+            }
+        }
+
+        return self::sessionFor($user);
+    }
+
+    /** Mirrors frontend/src/lib/password.js — enforced here so it cannot be bypassed. */
+    private static function strongPasswordProblem(string $password): ?string
+    {
+        $missing = [];
+        if (strlen($password) < 8) $missing[] = 'at least 8 characters';
+        if (!preg_match('/[A-Z]/', $password)) $missing[] = 'an uppercase letter';
+        if (!preg_match('/[a-z]/', $password)) $missing[] = 'a lowercase letter';
+        if (!preg_match('/[0-9]/', $password)) $missing[] = 'a number';
+        if (!preg_match('/[^A-Za-z0-9]/', $password)) $missing[] = 'a special symbol';
+        return $missing === [] ? null : 'Password needs: ' . implode(', ', $missing) . '.';
+    }
+
+    /** Issues the real (8-hour) app session for a resolved app_users row. */
+    private static function sessionFor(array $user): array
+    {
+        $token = self::issue([
+            'sub'   => (string) $user['id'],
+            'email' => $user['email'],
+            'role'  => $user['role'],
+            'iss'   => 'payroll-backend',
+            'aud'   => 'payroll-frontend',
+        ]);
+        return [
+            'token' => $token,
+            'user'  => ['id' => (int) $user['id'], 'email' => $user['email'], 'name' => $user['name'], 'role' => $user['role']],
+        ];
+    }
+
+    /**
+     * Applies a password chosen through the Supabase "reset password" recovery
+     * email: the caller proves control of the inbox with a valid recovery
+     * session, and we mirror the new password into app_users so login and the
+     * payslip gate keep working.
+     */
+    public static function resetPassword(string $accessToken, string $newPassword): array
+    {
+        $baseUrl = Config::supabaseUrl();
+        $anonKey = Config::anonKey();
+        if ($baseUrl === '' || $anonKey === '') {
+            Http::error('Supabase Auth is not configured on this server.', 503);
+        }
+        $weak = self::strongPasswordProblem($newPassword);
+        if ($weak !== null) {
+            Http::error($weak, 422);
+        }
+        $claims = self::supabaseUser($baseUrl, $anonKey, $accessToken);
+        if ($claims === null) {
+            Http::error('That recovery session is not valid or has expired.', 401);
+        }
+        $email = strtolower(trim((string) ($claims['email'] ?? '')));
+        if ($email === '') {
+            Http::error('The recovery session has no email address.', 401);
+        }
+        $stmt = Database::pdo()->prepare('UPDATE app_users SET password = ?, updated_at = now() WHERE lower(email) = ? AND is_active = TRUE RETURNING id');
+        $stmt->execute([password_hash($newPassword, PASSWORD_DEFAULT), $email]);
+        if ($stmt->fetchColumn() === false) {
+            Http::error('No workspace account exists for that email — sign in again or register.', 404);
+        }
+        return ['ok' => true, 'email' => $email];
+    }
+
+    /** @return array<string,mixed>|null the GoTrue user object, or null when the token is rejected */
+    private static function supabaseUser(string $baseUrl, string $anonKey, string $accessToken): ?array
+    {
+        $ch = curl_init(rtrim($baseUrl, '/') . '/auth/v1/user');
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 15,
+            CURLOPT_HTTPHEADER     => [
+                'apikey: ' . $anonKey,
+                'Authorization: Bearer ' . $accessToken,
+                'Content-Type: application/json',
+            ],
+        ]);
+        $response = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($response === false || $status !== 200) {
+            return null;
+        }
+        $decoded = json_decode((string) $response, true);
+        return is_array($decoded) ? $decoded : null;
     }
 
     private static function findAppUser(string $email): ?array
