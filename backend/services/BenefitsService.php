@@ -37,18 +37,9 @@ final class BenefitsService
             throw new RuntimeException('Select an active employee.', 422);
         }
 
-        // Company policy: benefits are reserved for regular employees, and only
-        // when their attendance in the trailing month was complete (no absences).
+        // Company policy: benefits are reserved for regular employees.
         if ($employee['employment_type'] !== 'Regular') {
             throw new RuntimeException('Benefits are only available to Regular employees (currently ' . $employee['employment_type'] . ').', 422);
-        }
-        $check = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM attendance_logs
-              WHERE employee_id = ? AND log_date >= CURRENT_DATE - INTERVAL '30 days' AND status = 'A'"
-        );
-        $check->execute([$employeeId]);
-        if ((int) $check->fetchColumn() > 0) {
-            throw new RuntimeException('Benefit enrollment requires complete attendance; this employee has absences in the last 30 days.', 422);
         }
 
         $stmt = $this->pdo->prepare('SELECT * FROM benefit_plans WHERE id = ? AND is_active = TRUE');

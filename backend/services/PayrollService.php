@@ -267,6 +267,12 @@ final class PayrollService
                 $line = $this->computeLine($item, (string) $run['period_start'], (string) $run['period_end']);
                 if ($persist) {
                     $this->writeLine((int) $item['id'], $line, 'Draft');
+                    // Claim this run's earned incentives so a recompute keeps them.
+                    $claim = $this->pdo->prepare(
+                        "UPDATE incentive_earnings SET payroll_run_id = ?
+                          WHERE employee_id = ? AND status = 'Earned' AND payroll_run_id IS NULL AND period = ?"
+                    );
+                    $claim->execute([$runId, (string) $item['employee_id'], date('Y-m', strtotime((string) $run['period_start']))]);
                 }
                 $computed[] = array_merge($item, $line);
             }
@@ -370,6 +376,12 @@ final class PayrollService
                 'SELECT COALESCE(SUM(bonus_amount),0) FROM recognition_awards WHERE employee_id = ? AND award_date BETWEEN ? AND ?',
                 $period
             ),
+            'incentives'           => $scalar(
+                "SELECT COALESCE(SUM(amount),0) FROM incentive_earnings
+                  WHERE employee_id = ? AND status = 'Earned'
+                    AND (payroll_run_id IS NULL OR payroll_run_id = ?) AND period = ?",
+                [$empId, (int) $item['payroll_run_id'], date('Y-m', strtotime($start))]
+            ),
             'loans_deduction'      => $scalar(
                 'SELECT COALESCE(SUM(monthly_deduction),0) FROM loans WHERE employee_id = ? AND status = \'Active\'',
                 [$empId]
@@ -400,7 +412,7 @@ final class PayrollService
         $line['gross_pay'] = round(array_sum(array_intersect_key($line, array_flip([
             'basic_pay', 'overtime_pay', 'night_differential', 'holiday_pay', 'allowances',
             'claims_amount', 'leave_conversion', 'performance_bonus', 'competency_allowance',
-            'training_incentive', 'recognition_bonus',
+            'training_incentive', 'recognition_bonus', 'incentives',
         ]))), 2);
 
         $sss     = TaxService::sss($salary);
@@ -597,6 +609,7 @@ final class PayrollService
         try {
             $this->pdo->prepare("UPDATE payroll_runs SET status = 'Draft' WHERE id = ?")->execute([$runId]);
             $this->pdo->prepare("UPDATE payroll_items SET status = 'Draft' WHERE payroll_run_id = ? AND is_included = TRUE")->execute([$runId]);
+            $this->pdo->prepare('UPDATE incentive_earnings SET payroll_run_id = NULL WHERE payroll_run_id = ? AND status = \'Earned\'')->execute([$runId]);
             $this->pdo->commit();
         } catch (\Throwable $e) {
             $this->pdo->rollBack();
@@ -633,6 +646,8 @@ final class PayrollService
 
             $refNo = 'DISB-' . $runId . '-' . date('Ymd-His');
             $this->pdo->prepare("UPDATE payroll_items SET status = 'Paid', pay_date = CURRENT_DATE WHERE payroll_run_id = ? AND is_included = TRUE")
+                ->execute([$runId]);
+            $this->pdo->prepare("UPDATE incentive_earnings SET status = 'Paid' WHERE payroll_run_id = ? AND status = 'Earned'")
                 ->execute([$runId]);
             $this->pdo->prepare("UPDATE payroll_runs SET status = 'Paid', run_date = now() WHERE id = ?")->execute([$runId]);
 
