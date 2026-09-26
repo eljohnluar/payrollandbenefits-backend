@@ -530,8 +530,17 @@ $router->delete('/api/benefit-plans/{id}', static function (array $p) use ($bene
 /* ── Settings update ────────────────────────────────── */
 
 $router->put('/api/settings', static function (): void {
-    Auth::requireRole('Admin');
-    Http::json(SettingsService::update(Http::body()));
+    $user = Auth::user();
+    $body = Http::body();
+    $password = (string) ($body['password'] ?? '');
+    unset($body['password']);
+    if ($password === '' || !Auth::verifyPassword($password)) {
+        AuditService::log('Failed Settings Update', 'Settings', (int) $user['id'], ['reason' => 'wrong password']);
+        Http::error('Incorrect password.', 403);
+    }
+    $updated = SettingsService::update($body);
+    AuditService::log('Settings Updated', 'Settings', (int) $user['id'], ['keys' => array_keys($body)]);
+    Http::json($updated);
 });
 
 /* ── Payslips list + PDF stream ─────────────────────── */

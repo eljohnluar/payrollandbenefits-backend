@@ -70,7 +70,6 @@ final class SettingsService
             $stmt->execute([(string) $key, (string) $value]);
         }
         self::$cache = null;
-        AuditService::log('Settings Updated', 'System', null, ['keys' => array_keys($pairs)]);
         return self::all();
     }
 }
