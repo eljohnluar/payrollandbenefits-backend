@@ -1,5 +1,5 @@
 {
-  "name": "payroll-benefits-api",
+  "name": "tri-m-global/payroll-benefits-api",
   "description": "PHP JSON API for the Payroll & Benefits system (Supabase PostgreSQL)",
   "type": "project",
   "license": "proprietary",
