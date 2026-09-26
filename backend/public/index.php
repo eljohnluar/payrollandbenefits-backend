@@ -57,6 +57,7 @@ $router->get('/api/health', static function (): void {
         'status'   => $dbError === null ? 'ok' : 'degraded',
         'database' => $dbError === null,
         'db_error' => $dbError,
+        'pdo_drivers' => PDO::getAvailableDrivers(),
         'supabase' => [
             'url_configured'        => Config::supabaseUrl() !== '',
             'jwt_secret_configured' => Config::jwtSecret() !== '',
