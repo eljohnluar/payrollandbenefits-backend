@@ -27,6 +27,26 @@ final class Config
         return (string) env('SUPABASE_JWT_SECRET', '');
     }
 
+    /**
+     * Google service-account JSON for Vision OCR, from GOOGLE_SA_JSON (inline)
+     * or the file at GOOGLE_APPLICATION_CREDENTIALS (Render secret file).
+     */
+    public static function googleServiceAccount(): ?array
+    {
+        $json = (string) env('GOOGLE_SA_JSON', '');
+        if ($json === '' && ($path = (string) env('GOOGLE_APPLICATION_CREDENTIALS', '')) !== '' && is_readable($path)) {
+            $json = (string) file_get_contents($path);
+        }
+        $sa = json_decode($json, true);
+        return is_array($sa) && isset($sa['client_email'], $sa['private_key']) ? $sa : null;
+    }
+
+    /** Tabscanner receipt-OCR API key (free Starter plan: 200 scans/month). */
+    public static function tabscannerKey(): string
+    {
+        return trim((string) env('TABSCANNER_API_KEY', ''));
+    }
+
     public static function isSupabaseConfigured(): bool
     {
         return self::jwtSecret() !== '' && self::supabaseUrl() !== '';

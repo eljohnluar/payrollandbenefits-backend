@@ -39,7 +39,10 @@ final class ClaimsService
         return $claim;
     }
 
-    public function submit(string $employeeId, string $category, float $amount, string $claimDate, string $description): array
+    /**
+     * @param array{base64:string,mime:string}|null $receipt uploaded receipt, OCR-verified inline
+     */
+    public function submit(string $employeeId, string $category, float $amount, string $claimDate, string $description, ?array $receipt = null): array
     {
         $stmt = $this->pdo->prepare("SELECT first_name, last_name FROM employees WHERE id = ? AND status IN ('Active','On Leave') AND is_archived = FALSE");
         $stmt->execute([$employeeId]);
@@ -75,8 +78,84 @@ final class ClaimsService
         ]);
         $claim = $insert->fetch();
 
-        AuditService::log('Claim Submitted', 'Claims', null, ['claim_number' => $number, 'employee_id' => $employeeId]);
+        $ocr = $this->verifyReceipt($claim, $receipt);
+        if ($ocr !== []) {
+            $columns = array_keys($ocr);
+            $set = implode(', ', array_map(static fn ($c) => "{$c} = ?", $columns));
+            $upd = $this->pdo->prepare("UPDATE claims SET {$set} WHERE id = ?");
+            $upd->execute([...array_values($ocr), $claim['id']]);
+            $claim = array_merge($claim, $ocr);
+        }
+
+        AuditService::log('Claim Submitted', 'Claims', null, ['claim_number' => $number, 'employee_id' => $employeeId, 'ocr' => $ocr['ocr_status'] ?? null]);
         return $claim;
+    }
+
+    /**
+     * Receipt verification. Never rejects a claim: OCR failures and missing
+     * configuration only flag it for manual review.
+     * Provider priority: Tabscanner (receipt-specialised, JPG/PNG) > Google
+     * Vision (also handles PDF) > Skipped.
+     */
+    private function verifyReceipt(array $claim, ?array $receipt): array
+    {
+        $base64 = isset($receipt['base64']) ? (string) $receipt['base64'] : '';
+        if ($base64 === '' || base64_decode($base64, true) === false) {
+            return [
+                'receipt_file' => null,
+                'ocr_status' => 'No receipt',
+                'ocr_flags' => json_encode(['No receipt uploaded — manual review required.']),
+                'ocr_checked_at' => gmdate('Y-m-d H:i:s'),
+            ];
+        }
+        $mime = (string) ($receipt['mime'] ?? 'image/jpeg');
+
+        $objectKey = sprintf('claim-receipts/%s.%s', $claim['claim_number'], $mime === 'application/pdf' ? 'pdf' : 'jpg');
+        $stored = $this->storeReceipt($objectKey, (string) base64_decode($base64), $mime);
+
+        $ocr = ['receipt_file' => $stored ? $objectKey : null];
+        if (TabscannerService::configured() && preg_match('#^image/(jpeg|png|jpg)$#i', $mime)) {
+            $ocr = array_merge($ocr, (new TabscannerService())->verify($claim, $base64, $mime));
+        } elseif (ReceiptOcrService::configured()) {
+            $ocr = array_merge($ocr, (new ReceiptOcrService($this->pdo))->verify($claim, $base64, $mime));
+            $ocr['ocr_provider'] = 'google-vision';
+        } else {
+            $ocr += [
+                'ocr_status' => 'Skipped',
+                'ocr_flags' => json_encode(['No receipt OCR provider is configured on this server — manual review required.']),
+                'ocr_checked_at' => gmdate('Y-m-d H:i:s'),
+            ];
+        }
+        return $ocr;
+    }
+
+    private function storeReceipt(string $objectKey, string $bytes, string $mime): bool
+    {
+        $url = Config::supabaseUrl();
+        $key = Config::serviceRoleKey();
+        if ($url === '' || $key === '' || $bytes === '') {
+            return false; // Storage not configured — OCR still ran on the inline bytes.
+        }
+        $ch = curl_init("{$url}/storage/v1/object/{$objectKey}");
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $bytes,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => [
+                'Authorization: Bearer ' . $key,
+                'apikey: ' . $key,
+                'Content-Type: ' . $mime,
+                'x-upsert: true',
+            ],
+            CURLOPT_TIMEOUT => 20,
+        ]);
+        $resp = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($status >= 400) {
+            error_log('[claims] receipt storage upload failed ' . $status . ' ' . substr((string) $resp, 0, 200));
+        }
+        return $status < 400;
     }
 
     /** HR review step. Payment itself goes through disburse() — Finance must release the cash. */

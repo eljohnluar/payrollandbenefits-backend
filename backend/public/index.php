@@ -400,6 +400,18 @@ $router->get('/api/claims/categories', static function () use ($claims): void {
     Http::json(['data' => $claims()->categories()]);
 });
 
+$router->get('/api/claims/ocr-usage', static function (): void {
+    Auth::user();
+    $tabscanner = \App\TabscannerService::configured();
+    $vision = \App\ReceiptOcrService::configured();
+    Http::json([
+        'provider' => $tabscanner ? 'tabscanner' : ($vision ? 'google-vision' : null),
+        'used' => $tabscanner ? \App\TabscannerService::monthlyUsage() : ($vision ? \App\ReceiptOcrService::monthlyUsage() : 0),
+        'free_tier' => $tabscanner ? 200 : 1000,
+        'configured' => $tabscanner || $vision,
+    ]);
+});
+
 $router->get('/api/claims/{id}', static function (array $p) use ($claims): void {
     Auth::user();
     Http::json($claims()->get((int) $p['id']));
@@ -408,12 +420,20 @@ $router->get('/api/claims/{id}', static function (array $p) use ($claims): void 
 $router->post('/api/claims/submit', static function () use ($claims): void {
     Auth::requireRole('Admin', 'HR', 'Payroll', 'Finance');
     $body = Http::body();
+    $receipt = null;
+    if (isset($body['receipt_base64']) && is_string($body['receipt_base64']) && $body['receipt_base64'] !== '') {
+        if (strlen($body['receipt_base64']) > 6_000_000) {
+            Http::error('Receipt image is too large (max ~4MB).', 413);
+        }
+        $receipt = ['base64' => $body['receipt_base64'], 'mime' => (string) ($body['receipt_mime'] ?? 'image/jpeg')];
+    }
     Http::json($claims()->submit(
         Http::requireString($body, 'employee_id'),
         Http::requireString($body, 'category'),
         Http::number($body, 'amount'),
         Http::requireString($body, 'claim_date'),
-        trim((string) ($body['description'] ?? ''))
+        trim((string) ($body['description'] ?? '')),
+        $receipt
     ), 201);
 });
 
